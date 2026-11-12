@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Timezone-conversion CLI (``tzconvert``).
+
+Implements the public requirements contract in ``README.md``: a single input
+mode (command-line arguments), a single output mode (one line on stdout),
+useful help text, and predictable errors. Standard library only.
+"""
+
+import re
+import sys
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+try:
+    from signal import SIG_DFL, SIGPIPE, signal
+
+    signal(SIGPIPE, SIG_DFL)
+except (ImportError, AttributeError, OSError, ValueError):
+    pass
+
+DATETIME_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$")
+
+USAGE_HINT = "expected DATETIME --from SRC_TZ --to DST_TZ"
+
+HELP_TEXT = """Usage: tzconvert DATETIME --from SRC_TZ --to DST_TZ
+
+Convert a wall-clock time from one IANA time zone to another.
+
+Arguments:
+  DATETIME          Wall-clock time in SRC_TZ, exactly YYYY-MM-DDTHH:MM
+                    (24-hour clock, zero-padded, e.g. 2026-01-15T12:00).
+  --from SRC_TZ     Source IANA time-zone name (e.g. America/New_York).
+  --to DST_TZ       Destination IANA time-zone name (e.g. UTC).
+
+Example:
+tzconvert 2026-01-15T12:00 --from America/New_York --to UTC
+
+DATETIME is the first argument; --from and --to may appear in either order
+after DATETIME. Only the space-separated spelling is accepted.
+--help and -h print this help and take precedence whenever present.
+"""
+
+
+def fail(reason):
+    """Report an input error: exit 2, one stderr line, empty stdout."""
+    clean = reason.replace("\r", " ").replace("\n", " ")
+    sys.stderr.write("Error: " + clean + "\n")
+    return 2
+
+
+def main(argv):
+    args = list(argv[1:])
+
+    # Help takes precedence whenever present (exact token match).
+    if any(a == "--help" or a == "-h" for a in args):
+        sys.stdout.write(HELP_TEXT)
+        return 0
+
+    if len(args) != 5:
+        if len(args) < 5:
+            return fail(
+                "missing argument: %s (got %d argument(s))"
+                % (USAGE_HINT, len(args))
+            )
+        return fail(
+            "extra/misplaced argument '%s': %s" % (args[5], USAGE_HINT)
+        )
+
+    dt_str, flag1, value1, flag2, value2 = args
+    allowed = ("--from", "--to")
+    if flag1 not in allowed:
+        return fail(
+            "extra/misplaced argument '%s': %s" % (flag1, USAGE_HINT)
+        )
+    if flag2 not in allowed:
+        return fail(
+            "extra/misplaced argument '%s': %s" % (flag2, USAGE_HINT)
+        )
+    if flag1 == flag2:
+        missing = "--to" if flag1 == "--from" else "--from"
+        return fail(
+            "missing argument '%s': %s" % (missing, USAGE_HINT)
+        )
+    for flag, value in ((flag1, value1), (flag2, value2)):
+        if value.startswith("-"):
+            return fail(
+                "extra/misplaced argument '%s' for '%s': %s"
+                % (value, flag, USAGE_HINT)
+            )
+
+    src = value1 if flag1 == "--from" else value2
+    dst = value2 if flag2 == "--to" else value1
+
+    match = DATETIME_RE.match(dt_str)
+    if not match:
+        return fail(
+            "invalid DATETIME '%s': expected YYYY-MM-DDTHH:MM" % dt_str
+        )
+    try:
+        naive = datetime(*map(int, match.groups()))
+    except ValueError:
+        return fail(
+            "invalid DATETIME '%s': not a real calendar time "
+            "(expected YYYY-MM-DDTHH:MM)" % dt_str
+        )
+
+    try:
+        src_zone = ZoneInfo(src)
+    except ZoneInfoNotFoundError:
+        return fail(
+            "unknown time zone '%s' for --from: "
+            "expected IANA time-zone name" % src
+        )
+    try:
+        dst_zone = ZoneInfo(dst)
+    except ZoneInfoNotFoundError:
+        return fail(
+            "unknown time zone '%s' for --to: "
+            "expected IANA time-zone name" % dst
+        )
+
+    # Resolve ambiguous (fall-back overlap) times to the earlier occurrence.
+    aware_src = naive.replace(tzinfo=src_zone, fold=0)
+
+    # Reject wall-clock times that never occur (spring-forward gap): they do
+    # not round-trip back to the same wall-clock time in the source zone.
+    as_utc = aware_src.astimezone(timezone.utc)
+    round_tripped = as_utc.astimezone(src_zone)
+    if round_tripped.replace(tzinfo=None) != naive:
+        return fail(
+            "nonexistent wall-clock time '%s' in time zone '%s': "
+            "the time never occurs there" % (dt_str, src)
+        )
+
+    converted = aware_src.astimezone(dst_zone)
+    sys.stdout.write(converted.strftime("%Y-%m-%dT%H:%M") + " " + dst + "\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main(sys.argv))
